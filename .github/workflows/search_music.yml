@@ -1,0 +1,58 @@
+name: Search YouTube Music
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Search query'
+        required: true
+      limit:
+        description: 'Number of results'
+        required: false
+        default: '10'
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install yt-dlp
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+          
+      - name: Search YouTube
+        run: |
+          echo "Searching YouTube for: ${{ github.event.inputs.query }}"
+          
+          # Search and get JSON results
+          yt-dlp \
+            --dump-json \
+            --flat-playlist \
+            --skip-download \
+            --no-warnings \
+            "ytsearch${{ github.event.inputs.limit }}:${{ github.event.inputs.query }}" \
+            > /tmp/search_results.json
+          
+          echo "Search completed!"
+          
+      - name: Parse and format results
+        run: |
+          python3 parse_search_results.py "${{ github.event.inputs.query }}"
+          
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-results
+          path: search_results.json
+          retention-days: 1
