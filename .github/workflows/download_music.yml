@@ -1,0 +1,206 @@
+name: Download Music from YouTube
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Search query for YouTube'
+        required: true
+      video_ids:
+        description: 'Comma-separated YouTube video IDs'
+        required: false
+      folder:
+        description: 'Download folder'
+        required: false
+        default: 'music'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install yt-dlp and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade yt-dlp mutagen
+          
+          # Install ffmpeg
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          
+          ffmpeg -version
+          yt-dlp --version
+          echo "yt-dlp and ffmpeg installed successfully"
+          
+      - name: Setup YouTube cookies
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          if [ -n "$YOUTUBE_COOKIES" ]; then
+            echo "Setting up YouTube cookies..."
+            # GitHub already decrypted the secret, just save it
+            echo "$YOUTUBE_COOKIES" > /tmp/youtube_cookies.txt
+            LINES=$(wc -l < /tmp/youtube_cookies.txt)
+            echo "Cookies file created with $LINES lines"
+            # Show first line (header) to verify format
+            head -n 1 /tmp/youtube_cookies.txt
+          else
+            echo "No YouTube cookies found in secrets"
+          fi
+          
+      - name: Download music
+        env:
+          VIDEO_IDS: ${{ github.event.inputs.video_ids }}
+        run: |
+          mkdir -p "${{ github.event.inputs.folder }}"
+          
+          if [ -n "$VIDEO_IDS" ]; then
+            echo "Downloading items: $VIDEO_IDS"
+            IFS=',' read -ra IDS <<< "$VIDEO_IDS"
+            
+            for id in "${IDS[@]}"; do
+              id=$(echo "$id" | xargs) # trim whitespace
+              
+              # Check if it's a full URL or just an ID
+              if [[ "$id" == http* ]]; then
+                URL="$id"
+                echo "Downloading from URL: $URL"
+              else
+                URL="https://youtube.com/watch?v=$id"
+                echo "Downloading video: $URL"
+              fi
+              
+              # Check if cookies file exists
+              COOKIES_ARG=""
+              if [ -f /tmp/youtube_cookies.txt ]; then
+                COOKIES_ARG="--cookies /tmp/youtube_cookies.txt"
+              fi
+              
+              if yt-dlp \
+                $COOKIES_ARG \
+                --no-check-certificates \
+                --format "bestaudio[ext=m4a]/bestaudio/best" \
+                --extract-audio \
+                --audio-format mp3 \
+                --audio-quality 5 \
+                --yes-playlist \
+                --max-filesize 50M \
+                --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                --extractor-args "youtube:player_client=android_music,web" \
+                --extractor-args "youtube:player_skip=webpage" \
+                --add-metadata \
+                --embed-thumbnail \
+                --verbose \
+                --output "${{ github.event.inputs.folder }}/%(title)s.%(ext)s" \
+                "$URL"; then
+                echo "✓ Successfully downloaded: $id"
+              else
+                echo "✗ Failed to download: $id"
+                echo "Error code: $?"
+              fi
+            done
+          else
+            echo "Searching and downloading: ${{ github.event.inputs.query }}"
+            
+            # Check if cookies file exists
+            COOKIES_ARG=""
+            if [ -f /tmp/youtube_cookies.txt ]; then
+              COOKIES_ARG="--cookies /tmp/youtube_cookies.txt"
+            fi
+            
+            if yt-dlp \
+              $COOKIES_ARG \
+              --no-check-certificates \
+              --format "bestaudio[ext=m4a]/bestaudio/best" \
+              --extract-audio \
+              --audio-format mp3 \
+              --audio-quality 5 \
+              --no-playlist \
+              --max-filesize 50M \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              --extractor-args "youtube:player_client=android_music,web" \
+              --extractor-args "youtube:player_skip=webpage" \
+              --add-metadata \
+              --embed-thumbnail \
+              --verbose \
+              --max-downloads 1 \
+              --output "${{ github.event.inputs.folder }}/%(title)s.%(ext)s" \
+              "ytsearch:${{ github.event.inputs.query }}"; then
+              echo "✓ Successfully downloaded from search"
+            else
+              echo "✗ Failed to download from search"
+              echo "Error code: $?"
+              echo "Query was: ${{ github.event.inputs.query }}"
+            fi
+          fi
+          
+      - name: List downloaded files
+        run: |
+          echo "Downloaded files:"
+          find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f
+          
+      - name: Upload to release
+        if: success()
+        run: |
+          TAG_NAME="music-$(date +%Y%m%d-%H%M%S)-$RANDOM"
+          echo "Creating release with tag: $TAG_NAME"
+          
+          # Find MP3 files
+          echo "Found MP3 files:"
+          find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f
+          
+          # Create release
+          if ! gh release create "$TAG_NAME" \
+            --title "Music Download - $(date)" \
+            --notes "Downloaded from YouTube" \
+            --latest=false 2>/tmp/release_error.txt; then
+            echo "Release creation warning/error:"
+            cat /tmp/release_error.txt
+            echo "Continuing with upload..."
+          fi
+          
+          # Upload files
+          echo "Uploading files to release..."
+          
+          MP3_FILES=()
+          while IFS= read -r -d '' file; do
+            MP3_FILES+=("$file")
+          done < <(find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f -print0)
+          
+          if [ ${#MP3_FILES[@]} -gt 0 ]; then
+            for file in "${MP3_FILES[@]}"; do
+              echo "Uploading: $file"
+              gh release upload "$TAG_NAME" "$file" --clobber || echo "Failed to upload $file"
+            done
+          else
+            echo "⚠️ No MP3 files found to upload"
+          fi
+          
+          echo "✅ Upload process completed for release: $TAG_NAME"
+          
+          # Prepare file list
+          FILE_LIST=""
+          for file in "${MP3_FILES[@]}"; do
+            BASENAME=$(basename "$file")
+            if [ -z "$FILE_LIST" ]; then
+              FILE_LIST="\"$BASENAME\""
+            else
+              FILE_LIST="$FILE_LIST,\"$BASENAME\""
+            fi
+          done
+          
+          echo "===RESULTS_START==="
+          echo "{\"release_tag\":\"$TAG_NAME\",\"files\":[$FILE_LIST]}"
+          echo "===RESULTS_END==="
+          
+          echo "release_tag=$TAG_NAME" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
