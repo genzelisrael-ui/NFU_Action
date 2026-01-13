@@ -51,7 +51,7 @@ def upload_single_file(session, upload_url_base, token, file_path, index):
         
         upload_url_with_name = f'{upload_url_base}?name={encoded_filename}'
         
-        print(f'\u2b06\ufe0f Starting upload: {filename}')
+        print(f'>> Starting upload: {filename}')
         
         with open(file_path, 'rb') as f:
             response = session.post(
@@ -64,19 +64,18 @@ def upload_single_file(session, upload_url_base, token, file_path, index):
         if response.status_code in (200, 201):
             result = response.json()
             asset_id = result.get('id')
-            print(f'\u2705 Finished upload: {filename}')
+            print(f'++ Finished upload: {filename}')
             return (True, filename, asset_id, index)
         else:
-            print(f'\u274c Failed to upload {filename}: {response.status_code} - {response.text}')
+            print(f'!! Failed to upload {filename}: {response.status_code} - {response.text}')
             return (False, filename, None, index)
             
     except Exception as e:
-        print(f'\u274c Exception during upload of {file_path}: {str(e)}')
+        print(f'!! Exception during upload of {file_path}: {str(e)}')
         return (False, str(file_path), None, index)
 
 def upload_to_release_parallel(token, owner, repo, tag_name, file_paths):
-    """Upload files to a GitHub release in parallel.
-    
+    """Upload files to a GitHub release in parallel.    
     Returns list of results.
     """
     # Create session with retries
@@ -92,7 +91,7 @@ def upload_to_release_parallel(token, owner, repo, tag_name, file_paths):
     try:
         response = session.get(url, headers=headers)
         if response.status_code != 200:
-            print(f'\u274c Failed to get release: {response.status_code} - {response.text}')
+            print(f'!! Failed to get release: {response.status_code} - {response.text}')
             return []
         
         release = response.json()
@@ -116,12 +115,12 @@ def upload_to_release_parallel(token, owner, repo, tag_name, file_paths):
                             'asset_id': asset_id
                         })
                 except Exception as exc:
-                    print(f'\u274c Generated an exception for file index {idx}: {exc}')
+                    print(f'!! Generated an exception for file index {idx}: {exc}')
                     
         return results
 
     except Exception as e:
-        print(f'\u274c Global error during upload process: {str(e)}')
+        print(f'!! Global error during upload process: {str(e)}')
         return []
 
 if __name__ == '__main__':
@@ -141,14 +140,14 @@ if __name__ == '__main__':
         if os.path.exists(fp):
             valid_paths.append(fp)
         else:
-             print(f'\u26a0\ufe0f File not found (skipping): {fp}')
+             print(f'** File not found (skipping): {fp}')
 
-    print(f'\ud83d\ude80 Starting parallel upload for {len(valid_paths)} files...')
+    print(f'>> Starting parallel upload for {len(valid_paths)} files...')
     
     filename_mapping = upload_to_release_parallel(token, owner, repo, tag_name, valid_paths)
     
     success_count = len(filename_mapping)
-    print(f'\n\ud83d\udcca Results: {success_count} succeeded out of {len(valid_paths)} attempts')
+    print(f'\n== Results: {success_count} succeeded out of {len(valid_paths)} attempts')
     
     # Output JSON mapping for server to parse
     if filename_mapping:
