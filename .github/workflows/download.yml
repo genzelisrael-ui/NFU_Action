@@ -1,0 +1,187 @@
+name: Download Podcasts
+
+on:
+  workflow_dispatch:
+    inputs:
+      feed_url:
+        description: 'RSS Feed URL'
+        required: false
+      episode_url:
+        description: 'Single episode URL to download'
+        required: false
+      episode_title:
+        description: 'Title for single episode'
+        required: false
+      episodes_json:
+        description: 'Multiple episodes as JSON array: [{url: str, title: str}]'
+        required: false
+      podcast_title:
+        description: 'Podcast title for multiple episodes'
+        required: false
+      episode_numbers:
+        description: 'Episode numbers to download (comma separated)'
+        required: false
+      last_n:
+        description: 'Download last N episodes'
+        required: false
+        default: '0'
+      folder:
+        description: 'Download folder'
+        required: false
+        default: 'downloads'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating releases
+      actions: read
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Download episodes
+        env:
+          EPISODE_TITLE: ${{ github.event.inputs.episode_title }}
+          EPISODES_JSON: ${{ github.event.inputs.episodes_json }}
+        run: |
+          mkdir -p "${{ github.event.inputs.folder }}"
+          
+          # בדיקה אם זו הורדת פרקים מרובים
+          if [ -n "$EPISODES_JSON" ]; then
+            echo "Downloading multiple episodes from JSON"
+            
+            # שמור JSON לקובץ עם UTF-8 encoding (using Python script to preserve encoding)
+            python3 write_episodes_json.py
+            
+            echo "Episodes JSON file content (first 200 chars):"
+            head -c 200 /tmp/episodes.json
+            echo ""
+            
+            # הרץ סקריפט להורדת פרקים מרובים
+            python3 download_multiple_episodes.py /tmp/episodes.json "${{ github.event.inputs.folder }}"
+            
+          # בדיקה אם זו הורדת פרק בודד
+          elif [ -n "${{ github.event.inputs.episode_url }}" ]; then
+            echo "Downloading single episode: ${{ github.event.inputs.episode_url }}"
+            
+            # קביעת שם קובץ - כתיבה לקובץ כדי לשמור על UTF-8
+            if [ -n "$EPISODE_TITLE" ]; then
+              # Use Python script to write title - avoids ALL quoting issues
+              python3 write_title.py
+              
+              echo "Title file content:"
+              cat /tmp/episode_title.txt
+              echo ""
+              echo "Title file hex dump:"
+              xxd /tmp/episode_title.txt | head -n 5
+              
+              FILENAME=$(python3 generate_filename_from_file.py /tmp/episode_title.txt)
+            else
+              FILENAME="episode_$(date +%Y%m%d_%H%M%S).mp3"
+            fi
+            
+            echo "Target filename: $FILENAME"
+            echo "Filename hex dump:"
+            echo "$FILENAME" | xxd | head -n 2
+            
+            # הורדה עם wget או curl
+            wget -O "${{ github.event.inputs.folder }}/$FILENAME" "${{ github.event.inputs.episode_url }}" || curl -L -o "${{ github.event.inputs.folder }}/$FILENAME" "${{ github.event.inputs.episode_url }}"
+            
+          else
+            # הורדה רגילה של פודקאסט שלם
+            python main.py --action download \
+              --feed-url "${{ github.event.inputs.feed_url }}" \
+              --episodes "${{ github.event.inputs.episode_numbers }}" \
+              --last-n "${{ github.event.inputs.last_n }}" \
+              --folder "${{ github.event.inputs.folder }}" \
+              --local
+          fi
+            
+      - name: Clean file names for upload
+        if: success()
+        run: |
+          echo "=== Cleaning file names for GitHub compatibility ==="
+          echo "Files before cleaning:"
+          find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f -exec basename {} \;
+          
+          python3 clean_hebrew_filenames.py "${{ github.event.inputs.folder }}"
+          
+          echo "Files after cleaning:"
+          find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f -exec basename {} \;
+          
+      - name: Upload artifacts as release
+        if: success()
+        run: |
+          # Create a unique tag for this download - include random to avoid collisions
+          TAG_NAME="download-$(date +%Y%m%d-%H%M%S)-$RANDOM"
+          echo "Creating release with tag: $TAG_NAME"
+          
+          # Find MP3 files with better handling of special characters
+          echo "Found MP3 files:"
+          find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f | while IFS= read -r file; do
+            echo "$file"
+          done
+          
+          # Create release (or use existing if tag collision)
+          if ! gh release create "$TAG_NAME" \
+            --title "Podcast Download - $(date)" \
+            --notes "Downloaded from: ${{ github.event.inputs.feed_url }}" \
+            --latest=false 2>/tmp/release_error.txt; then
+            echo "Release creation warning/error:"
+            cat /tmp/release_error.txt
+            echo "Continuing with upload..."
+          fi
+          
+          # Upload files using Python script (preserves Hebrew filenames)
+          echo "Uploading files to release..."
+          echo "Files to upload:"
+          find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f
+          
+          # Collect all MP3 files (including in subdirectories) into array
+          MP3_FILES=()
+          while IFS= read -r -d '' file; do
+            MP3_FILES+=("$file")
+          done < <(find "${{ github.event.inputs.folder }}" -name "*.mp3" -type f -print0)
+          
+          # Upload all files
+          if [ ${#MP3_FILES[@]} -gt 0 ]; then
+            python3 upload_to_release.py \
+              "${{ secrets.GITHUB_TOKEN }}" \
+              "${{ github.repository_owner }}" \
+              "${{ github.event.repository.name }}" \
+              "$TAG_NAME" \
+              "${MP3_FILES[@]}"
+          else
+            echo "⚠️ No MP3 files found to upload"
+          fi
+          
+          echo "✅ Upload process completed for release: $TAG_NAME"
+          
+          # Output the release tag for the server to parse
+          echo "===RESULTS_START==="
+          echo "$TAG_NAME"
+          echo "===RESULTS_END==="
+          
+          echo "release_tag=$TAG_NAME" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      # # Keep the old artifact method as backup
+      # - name: Upload artifacts (backup)
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: podcast-episodes
+      #     path: |
+      #       ${{ github.event.inputs.folder }}/**/*.mp3
+      #       ${{ github.event.inputs.folder }}/**/*.zip
+      #     retention-days: 5
