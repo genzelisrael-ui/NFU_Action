@@ -1,5 +1,5 @@
 name: Podcast Search
-# Refreshed: Force Update
+# Refreshed: Fix Quotes 2
 
 on:
   workflow_dispatch:
@@ -44,7 +44,8 @@ jobs:
               with open('/tmp/response.json', 'r', encoding='utf-8') as f:
                   data = json.load(f)
               results = {'podcasts': data.get('results', [])}
-              print(f'Found {len(results["podcasts"])} results')
+              count = len(results['podcasts'])
+              print(f'Found {count} results')
               
               # Output result wrapped in base64
               json_str = json.dumps(results, ensure_ascii=False)
