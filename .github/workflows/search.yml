@@ -1,4 +1,5 @@
 name: Podcast Search
+# Refreshed: Force Update
 
 on:
   workflow_dispatch:
@@ -33,19 +34,15 @@ jobs:
           
           # Curl request to iTunes API
           URL="https://itunes.apple.com/search?term=$ENCODED_QUERY&entity=podcast&limit=$LIMIT"
-          RESPONSE=$(curl -s "$URL")
+          curl -s "$URL" > /tmp/response.json
           
           # Process with python standard lib (no installs needed)
           python3 -c "
           import sys, json, base64
           try:
-              # Parse JSON response from curl
-              response_str = '''$RESPONSE'''
-              if not response_str or '{' not in response_str:
-                  print('Invalid response from iTunes')
-                  sys.exit(1)
-                  
-              data = json.loads(response_str)
+              # Parse JSON response from file (safer than string injection)
+              with open('/tmp/response.json', 'r', encoding='utf-8') as f:
+                  data = json.load(f)
               results = {'podcasts': data.get('results', [])}
               print(f'Found {len(results["podcasts"])} results')
               
