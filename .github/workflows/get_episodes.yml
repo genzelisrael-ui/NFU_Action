@@ -1,0 +1,106 @@
+name: Get Podcast Episodes
+
+on:
+  workflow_dispatch:
+    inputs:
+      feed_url:
+        description: 'RSS Feed URL'
+        required: true
+
+jobs:
+  get-episodes:
+    runs-on: ubuntu-latest
+    steps:
+      # Optimized: No checkout needed
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip install feedparser
+          
+      - name: Get episodes
+        run: |
+          python - <<'PYTHON_SCRIPT'
+          import feedparser
+          import json
+          import base64
+          import sys
+          
+          feed_url = "${{ github.event.inputs.feed_url }}"
+          
+          print(f"Fetching feed: {feed_url}")
+          feed = feedparser.parse(feed_url)
+          
+          if not feed.entries:
+              print("ERROR: No episodes found in feed")
+              sys.exit(1)
+          
+          episodes = []
+          total_duration = 0
+          total_size = 0
+          
+          for entry in feed.entries:
+              episode = {
+                  'title': entry.get('title', 'No title'),
+                  'description': entry.get('summary', '')[:200],
+                  'published': entry.get('published', ''),
+                  'duration': 0,
+                  'size': 0,
+                  'url': ''
+              }
+              
+              # Get enclosure (audio file)
+              if hasattr(entry, 'enclosures') and entry.enclosures:
+                  enclosure = entry.enclosures[0]
+                  episode['url'] = enclosure.get('href', '')
+                  try:
+                      episode['size'] = int(enclosure.get('length', 0))
+                      total_size += episode['size']
+                  except:
+                      pass
+              
+              # Get duration (iTunes tag)
+              if hasattr(entry, 'itunes_duration'):
+                  duration_str = entry.itunes_duration
+                  try:
+                      if ':' in str(duration_str):
+                          parts = str(duration_str).split(':')
+                          if len(parts) == 3:
+                              h, m, s = parts
+                              episode['duration'] = int(h) * 3600 + int(m) * 60 + int(s)
+                          elif len(parts) == 2:
+                              m, s = parts
+                              episode['duration'] = int(m) * 60 + int(s)
+                      else:
+                          episode['duration'] = int(duration_str)
+                      total_duration += episode['duration']
+                  except:
+                      pass
+              
+              episodes.append(episode)
+          
+          result = {
+              'title': feed.feed.get('title', ''),
+              'description': feed.feed.get('description', ''),
+              'author': feed.feed.get('author', feed.feed.get('itunes_author', '')),
+              'image': feed.feed.get('image', {}).get('href', '') if hasattr(feed.feed.get('image', {}), 'get') else '',
+              'episodes': episodes,
+              'episode_count': len(episodes),
+              'total_size': total_size,
+              'total_duration': total_duration
+          }
+          
+          # Encode to base64
+          json_str = json.dumps(result, ensure_ascii=False)
+          encoded = base64.b64encode(json_str.encode('utf-8')).decode('ascii')
+          
+          print("===START_EPISODES===")
+          print(encoded)
+          print("===END_EPISODES===")
+          print(f"Successfully processed {len(episodes)} episodes")
+          
+          PYTHON_SCRIPT
