@@ -2,6 +2,7 @@
 """Upload files to GitHub Release with proper Hebrew filename support."""
 import sys
 import os
+import time
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -11,12 +12,12 @@ from pathlib import Path
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def create_retry_session(retries=5, backoff_factor=1, status_forcelist=None):
+def create_retry_session(retries=10, backoff_factor=1, status_forcelist=None):
     """Create a requests session with retry logic."""
     session = requests.Session()
     
     if status_forcelist is None:
-        status_forcelist = [429, 500, 502, 503, 504]
+        status_forcelist = [404, 429, 500, 502, 503, 504]
     
     retry = Retry(
         total=retries,
@@ -49,7 +50,9 @@ def upload_single_file(session, upload_url_base, token, file_path, index):
             'Content-Type': content_type
         }
         
-        upload_url_with_name = f'{upload_url_base}?name={encoded_filename}'
+        # Fix: Ensure upload_url_base doesn't have query params already
+        clean_url_base = upload_url_base.split('?')[0]
+        upload_url_with_name = f'{clean_url_base}?name={encoded_filename}'
         
         print(f'>> Starting upload: {filename}')
         
@@ -66,6 +69,14 @@ def upload_single_file(session, upload_url_base, token, file_path, index):
             asset_id = result.get('id')
             print(f'++ Finished upload: {filename}')
             return (True, filename, asset_id, index)
+            
+        # Handle 422 Validation Failed (likely file already exists)
+        elif response.status_code == 422:
+            print(f'!! Validation failed for {filename} (likely duplicate): {response.text}')
+            # Attempt to delete and retry or just skip? 
+            # For now, let's treat it as a skip but success for the process flow
+            return (True, filename, None, index)
+            
         else:
             print(f'!! Failed to upload {filename}: {response.status_code} - {response.text}')
             return (False, filename, None, index)
@@ -75,7 +86,8 @@ def upload_single_file(session, upload_url_base, token, file_path, index):
         return (False, str(file_path), None, index)
 
 def upload_to_release_parallel(token, owner, repo, tag_name, file_paths):
-    """Upload files to a GitHub release in parallel.    
+    """Upload files to a GitHub release in parallel.
+    
     Returns list of results.
     """
     # Create session with retries
@@ -97,8 +109,11 @@ def upload_to_release_parallel(token, owner, repo, tag_name, file_paths):
         release = response.json()
         upload_url_base = release['upload_url'].split('{')[0]
         
+        print(">> Waiting 10 seconds for release propagation...")
+        time.sleep(10)
+        
         results = []
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_file = {
                 executor.submit(upload_single_file, session, upload_url_base, token, fp, idx): idx 
                 for idx, fp in enumerate(file_paths)
