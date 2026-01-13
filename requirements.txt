@@ -1,0 +1,6 @@
+Flask
+requests
+PyGithub
+feedparser
+mutagen
+yt-dlp
