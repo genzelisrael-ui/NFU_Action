@@ -9,6 +9,7 @@ import mimetypes
 import json
 from pathlib import Path
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def create_retry_session(retries=5, backoff_factor=1, status_forcelist=None):
     """Create a requests session with retry logic."""
@@ -32,10 +33,51 @@ def create_retry_session(retries=5, backoff_factor=1, status_forcelist=None):
     
     return session
 
-def upload_to_release(token, owner, repo, tag_name, file_path):
-    """Upload a file to a GitHub release with proper Unicode handling.
+def upload_single_file(session, upload_url_base, token, file_path, index):
+    """Upload a single file used by ThreadPoolExecutor."""
+    try:
+        file_path = Path(file_path)
+        filename = file_path.name
+        
+        # URL encode the filename for GitHub API
+        encoded_filename = quote(filename, safe='')
+        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        
+        # Upload headers
+        upload_headers = {
+            'Authorization': f'token {token}',
+            'Content-Type': content_type
+        }
+        
+        upload_url_with_name = f'{upload_url_base}?name={encoded_filename}'
+        
+        print(f'\u2b06\ufe0f Starting upload: {filename}')
+        
+        with open(file_path, 'rb') as f:
+            response = session.post(
+                upload_url_with_name,
+                headers=upload_headers,
+                data=f,
+                timeout=300 # 5 minutes timeout per file
+            )
+        
+        if response.status_code in (200, 201):
+            result = response.json()
+            asset_id = result.get('id')
+            print(f'\u2705 Finished upload: {filename}')
+            return (True, filename, asset_id, index)
+        else:
+            print(f'\u274c Failed to upload {filename}: {response.status_code} - {response.text}')
+            return (False, filename, None, index)
+            
+    except Exception as e:
+        print(f'\u274c Exception during upload of {file_path}: {str(e)}')
+        return (False, str(file_path), None, index)
+
+def upload_to_release_parallel(token, owner, repo, tag_name, file_paths):
+    """Upload files to a GitHub release in parallel.
     
-    Returns tuple: (success: bool, original_filename: str, asset_id: int)
+    Returns list of results.
     """
     # Create session with retries
     session = create_retry_session()
@@ -51,46 +93,36 @@ def upload_to_release(token, owner, repo, tag_name, file_path):
         response = session.get(url, headers=headers)
         if response.status_code != 200:
             print(f'\u274c Failed to get release: {response.status_code} - {response.text}')
-            return (False, None, None)
+            return []
         
         release = response.json()
-        upload_url = release['upload_url'].split('{')[0]
+        upload_url_base = release['upload_url'].split('{')[0]
         
-        # Get filename and content type
-        file_path = Path(file_path)
-        filename = file_path.name
-        
-        # URL encode the filename for GitHub API
-        encoded_filename = quote(filename, safe='')
-        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
-        
-        # Upload file
-        upload_headers = {
-            'Authorization': f'token {token}',
-            'Content-Type': content_type
-        }
-        
-        upload_url_with_name = f'{upload_url}?name={encoded_filename}'
-        
-        with open(file_path, 'rb') as f:
-            response = session.post(
-                upload_url_with_name,
-                headers=upload_headers,
-                data=f
-            )
-        
-        if response.status_code in (200, 201):
-            result = response.json()
-            asset_id = result.get('id')
-            print(f'\u2705 Successfully uploaded: {filename}')
-            return (True, filename, asset_id)
-        else:
-            print(f'\u274c Failed to upload {filename}: {response.status_code} - {response.text}')
-            return (False, None, None)
+        results = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_file = {
+                executor.submit(upload_single_file, session, upload_url_base, token, fp, idx): idx 
+                for idx, fp in enumerate(file_paths)
+            }
             
-    except requests.exceptions.RequestException as e:
-        print(f'\u274c Exception during upload of {file_path}: {str(e)}')
-        return (False, None, None)
+            for future in as_completed(future_to_file):
+                idx = future_to_file[future]
+                try:
+                    success, name, asset_id, original_idx = future.result()
+                    if success:
+                        results.append({
+                            'index': original_idx,
+                            'original_name': name,
+                            'asset_id': asset_id
+                        })
+                except Exception as exc:
+                    print(f'\u274c Generated an exception for file index {idx}: {exc}')
+                    
+        return results
+
+    except Exception as e:
+        print(f'\u274c Global error during upload process: {str(e)}')
+        return []
 
 if __name__ == '__main__':
     if len(sys.argv) < 5:
@@ -103,36 +135,30 @@ if __name__ == '__main__':
     tag_name = sys.argv[4]
     file_paths = sys.argv[5:]
     
-    success_count = 0
-    fail_count = 0
-    filename_mapping = []
-    
-    for idx, file_path in enumerate(file_paths):
-        if not os.path.exists(file_path):
-            print(f'\u274c File not found: {file_path}')
-            fail_count += 1
-            continue
-        
-        success, original_name, asset_id = upload_to_release(token, owner, repo, tag_name, file_path)
-        if success:
-            success_count += 1
-            filename_mapping.append({
-                'index': idx,
-                'original_name': original_name,
-                'asset_id': asset_id
-            })
+    # Filter only existing files
+    valid_paths = []
+    for fp in file_paths:
+        if os.path.exists(fp):
+            valid_paths.append(fp)
         else:
-            fail_count += 1
+             print(f'\u26a0\ufe0f File not found (skipping): {fp}')
+
+    print(f'\ud83d\ude80 Starting parallel upload for {len(valid_paths)} files...')
     
-    print(f'\n\ud83d\udcca Results: {success_count} succeeded, {fail_count} failed')
+    filename_mapping = upload_to_release_parallel(token, owner, repo, tag_name, valid_paths)
     
-    # Output JSON mapping for server to parse (Base64 encoded to avoid GitHub Actions log corruption)
+    success_count = len(filename_mapping)
+    print(f'\n\ud83d\udcca Results: {success_count} succeeded out of {len(valid_paths)} attempts')
+    
+    # Output JSON mapping for server to parse
     if filename_mapping:
         print('\n===FILENAME_MAPPING_START===')
         import base64
+        # Sort by index to maintain original order if needed, though mostly relevant for mapping
+        filename_mapping.sort(key=lambda x: x['index'])
         json_str = json.dumps(filename_mapping, ensure_ascii=True)
         encoded = base64.b64encode(json_str.encode('utf-8')).decode('ascii')
         print(encoded)
         print('===FILENAME_MAPPING_END===')
     
-    sys.exit(0 if fail_count == 0 else 1)
+    sys.exit(0 if success_count == len(valid_paths) else 1)
