@@ -1,0 +1,62 @@
+name: Podcast Search
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Search query'
+        required: true
+        default: ''
+      limit:
+        description: 'Number of results'
+        required: false
+        default: '10'
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Super Optimized: No checkout, No setup-python, No pip install
+      # Uses system tools only for maximum speed
+      
+      - name: Search via System Tools
+        run: |
+          # URL Encode query using python one-liner (standard lib)
+          QUERY="${{ github.event.inputs.query }}"
+          LIMIT="${{ github.event.inputs.limit }}"
+          
+          # Use python3 already installed on runner to encode URL
+          ENCODED_QUERY=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$QUERY'''))")
+          
+          echo "Searching for: $QUERY"
+          
+          # Curl request to iTunes API
+          URL="https://itunes.apple.com/search?term=$ENCODED_QUERY&entity=podcast&limit=$LIMIT"
+          RESPONSE=$(curl -s "$URL")
+          
+          # Process with python standard lib (no installs needed)
+          python3 -c "
+          import sys, json, base64
+          try:
+              # Parse JSON response from curl
+              response_str = '''$RESPONSE'''
+              if not response_str or '{' not in response_str:
+                  print('Invalid response from iTunes')
+                  sys.exit(1)
+                  
+              data = json.loads(response_str)
+              results = {'podcasts': data.get('results', [])}
+              print(f'Found {len(results["podcasts"])} results')
+              
+              # Output result wrapped in base64
+              json_str = json.dumps(results, ensure_ascii=False)
+              encoded = base64.b64encode(json_str.encode('utf-8')).decode('ascii')
+              
+              print('===RESULTS_START===')
+              print(encoded)
+              print('===RESULTS_END===')
+          except Exception as e:
+              print(f'Error processing: {e}')
+              sys.exit(1)
+          "
