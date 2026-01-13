@@ -3,16 +3,43 @@
 import sys
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import mimetypes
 import json
 from pathlib import Path
 from urllib.parse import quote
+
+def create_retry_session(retries=5, backoff_factor=1, status_forcelist=None):
+    """Create a requests session with retry logic."""
+    session = requests.Session()
+    
+    if status_forcelist is None:
+        status_forcelist = [429, 500, 502, 503, 504]
+    
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        allowed_methods=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
+    )
+    
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
 
 def upload_to_release(token, owner, repo, tag_name, file_path):
     """Upload a file to a GitHub release with proper Unicode handling.
     
     Returns tuple: (success: bool, original_filename: str, asset_id: int)
     """
+    # Create session with retries
+    session = create_retry_session()
+
     # Get release by tag
     url = f'https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag_name}'
     headers = {
@@ -20,44 +47,49 @@ def upload_to_release(token, owner, repo, tag_name, file_path):
         'Accept': 'application/vnd.github.v3+json'
     }
     
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(f'❌ Failed to get release: {response.status_code}')
-        return (False, None, None)
-    
-    release = response.json()
-    upload_url = release['upload_url'].split('{')[0]
-    
-    # Get filename and content type
-    file_path = Path(file_path)
-    filename = file_path.name
-    
-    # URL encode the filename for GitHub API
-    encoded_filename = quote(filename, safe='')
-    content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
-    
-    # Upload file
-    upload_headers = {
-        'Authorization': f'token {token}',
-        'Content-Type': content_type
-    }
-    
-    upload_url_with_name = f'{upload_url}?name={encoded_filename}'
-    
-    with open(file_path, 'rb') as f:
-        response = requests.post(
-            upload_url_with_name,
-            headers=upload_headers,
-            data=f
-        )
-    
-    if response.status_code in (200, 201):
-        result = response.json()
-        asset_id = result.get('id')
-        print(f'✅ Successfully uploaded: {filename}')
-        return (True, filename, asset_id)
-    else:
-        print(f'❌ Failed to upload {filename}: {response.status_code}')
+    try:
+        response = session.get(url, headers=headers)
+        if response.status_code != 200:
+            print(f'\u274c Failed to get release: {response.status_code} - {response.text}')
+            return (False, None, None)
+        
+        release = response.json()
+        upload_url = release['upload_url'].split('{')[0]
+        
+        # Get filename and content type
+        file_path = Path(file_path)
+        filename = file_path.name
+        
+        # URL encode the filename for GitHub API
+        encoded_filename = quote(filename, safe='')
+        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        
+        # Upload file
+        upload_headers = {
+            'Authorization': f'token {token}',
+            'Content-Type': content_type
+        }
+        
+        upload_url_with_name = f'{upload_url}?name={encoded_filename}'
+        
+        with open(file_path, 'rb') as f:
+            response = session.post(
+                upload_url_with_name,
+                headers=upload_headers,
+                data=f
+            )
+        
+        if response.status_code in (200, 201):
+            result = response.json()
+            asset_id = result.get('id')
+            print(f'\u2705 Successfully uploaded: {filename}')
+            return (True, filename, asset_id)
+        else:
+            print(f'\u274c Failed to upload {filename}: {response.status_code} - {response.text}')
+            return (False, None, None)
+            
+    except requests.exceptions.RequestException as e:
+        print(f'\u274c Exception during upload of {file_path}: {str(e)}')
         return (False, None, None)
 
 if __name__ == '__main__':
@@ -77,7 +109,7 @@ if __name__ == '__main__':
     
     for idx, file_path in enumerate(file_paths):
         if not os.path.exists(file_path):
-            print(f'❌ File not found: {file_path}')
+            print(f'\u274c File not found: {file_path}')
             fail_count += 1
             continue
         
@@ -92,7 +124,7 @@ if __name__ == '__main__':
         else:
             fail_count += 1
     
-    print(f'\n📊 Results: {success_count} succeeded, {fail_count} failed')
+    print(f'\n\ud83d\udcca Results: {success_count} succeeded, {fail_count} failed')
     
     # Output JSON mapping for server to parse (Base64 encoded to avoid GitHub Actions log corruption)
     if filename_mapping:
